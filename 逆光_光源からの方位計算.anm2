@@ -1,0 +1,298 @@
+--label:光効果
+--track@light_x:光源位置X,-2000,2000,0.0,0.1;
+--track@light_y:光源位置Y,-2000,2000,0.0,0.1;
+--track@light_size:光源サイズ,0,5000,1000,0.1;
+--track@light_xy:光源縦横比, -1.00, 1.00, 0, 0.01;
+--track@radius_light:光源の丸さ,0,200,0,0.01;
+--track@light_bloom:光の指向性,0,1.0,1.0,0.01;
+--track@strength:光の強さ,1,10.0,1,0.01;
+--track@mask:マスクの濃さ,0.0, 1.0, 0.0, 0.01;
+--track@length:光の距離,0.0, 200.0, 0.0, 0.01;
+--select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界ぼかし=2, 境界ぼかし(光源反映)=3
+--group@色
+--color@col:色,0xffffff;
+--track@hueShift:色相_時間制御用,-360,360,0,0.1
+--track@saturateShift:彩度_時間制御用,-100,100,0,0.1
+--光源の丸さによってぼかし処理を入れる　一定以上の大きさの時は縮小してからぼかして再拡大
+--[[pixelshader@NormalFilter:
+Texture2D tempbuffer : register(t0);
+Texture2D Origin : register(t1);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float strength;
+    float light_bloom;
+};
+float DirectionFilter(float2 grad, float angle, float useAngle)
+{
+    float rad = radians(angle);
+    float2 dir = float2(cos(rad), sin(rad));
+    float d = (1 + dot(normalize(grad + 0.0001),dir))/2;
+    return lerp(1.0, d, useAngle); //同じ方向で1　直角で0.5　真逆で0
+}
+float4 NormalFilter(float4 input : SV_Position): SV_Target{
+    uint w,h;
+    tempbuffer.GetDimensions(w,h);
+    float2 texelSize = float2(1.0/w, 1.0/h);
+
+    float2 uv = input.xy * texelSize;
+    float4 origin = Origin.Sample(sampler0, uv);
+    float4 color = float4(0,0,0,0);
+    
+    // 3x3近傍のαを取得
+    float a00 = tempbuffer.Sample(sampler0, uv + float2(-1,-1) * texelSize).a;
+    float a10 = tempbuffer.Sample(sampler0, uv + float2( 0,-1) * texelSize).a;
+    float a20 = tempbuffer.Sample(sampler0, uv + float2( 1,-1) * texelSize).a;
+    float a01 = tempbuffer.Sample(sampler0, uv + float2(-1, 0) * texelSize).a;
+    float a21 = tempbuffer.Sample(sampler0, uv + float2( 1, 0) * texelSize).a;
+    float a02 = tempbuffer.Sample(sampler0, uv + float2(-1, 1) * texelSize).a;
+    float a12 = tempbuffer.Sample(sampler0, uv + float2( 0, 1) * texelSize).a;
+    float a22 = tempbuffer.Sample(sampler0, uv + float2( 1, 1) * texelSize).a;
+
+    // Sobel勾配計算
+    float gx = -a00 - 2*a01 - a02 + a20 + 2*a21 + a22;
+    float gy = -a00 - 2*a10 - a20 + a02 + 2*a12 + a22;
+    float gradient = sqrt(gx*gx + gy*gy) / sqrt(32);
+
+    
+
+    float3 n = normalize(float3(-gx*strength, -gy*strength, 1-light_bloom+0.01));
+    float3 NormalColor = (n * 0.5 + 0.5)*a00;
+
+    return float4(NormalColor*origin.a, origin.a);
+
+}
+]]
+
+--ブラー
+--[[pixelshader@CauchyBlur:
+Texture2D tempbuffer : register(t0);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float radius;
+    float angle;
+};
+float4 CauchyBlur(float4 pos : SV_Position): SV_Target{
+    uint w,h;
+    tempbuffer.GetDimensions(w,h);
+    float2 texelSize = float2(1.0/w, 1.0/h);
+    float2 uv = pos.xy * texelSize;
+
+    float4 result =  float4(0,0,0,0);
+
+    int samples = (int)(radius * 6.0);
+    samples = clamp(samples, (int)32, (int)256);
+    float pi = 3.1415926;
+    float rad = angle / 180 * pi;
+
+    float totalW = 0.0;
+    if(radius < 1e-4)return tempbuffer.Sample(sampler0, uv);
+    for(int i = (-1 * samples); i <= samples; i++){
+        float2 offset = float2(
+            i * texelSize.x * cos(rad), 
+            i * sin(rad) * texelSize.y
+            );
+        float2 sampleUV = uv + offset;
+        float inside = (all(sampleUV >= 0.0) && all(sampleUV <= 1.0)) ? 1.0 : 0.0;
+        float dist = abs(float(i))/radius;
+        float weight = 1.0 / (dist * dist + 1.0);
+        result += tempbuffer.Sample(sampler0, sampleUV) * weight * inside;
+        totalW += weight;
+    }
+    result /= totalW;
+    return result;
+
+}
+]]
+
+--空白部分を検知
+--[[pixelshader@EmptyLight:
+Texture2D tempbuffer : register(t0);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float mask;        //閾値(0.0 ~ 1.0)
+};
+float linearstep(float edge0, float edge1, float x){
+    return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
+}
+float4 EmptyLight(float4 input : SV_Position): SV_Target{
+    uint w,h;
+    tempbuffer.GetDimensions(w,h);
+    float2 texelSize = float2(1.0/w, 1.0/h);
+
+    float2 uv = input.xy * texelSize;
+    float4 origin = tempbuffer.Sample(sampler0, uv);
+    float4 color = float4(0,0,0,0);
+
+
+    float edge = linearstep(mask, 1, 1-origin.a);
+    float3 edgeColor = float3(1,1,1);
+    float3 addColor = edgeColor * edge ;
+
+
+    return float4(addColor, edge);//出力用
+}
+]]
+
+--空白部分を検知しそこを光源の光で埋める
+--[[pixelshader@EmptyLightAndLightMap:
+Texture2D tempbuffer : register(t0);
+Texture2D lightMap : register(t1);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float mask;        //閾値(0.0 ~ 1.0)
+};
+float linearstep(float edge0, float edge1, float x){
+    return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
+}
+float4 EmptyLightAndLightMap(float4 input : SV_Position): SV_Target{
+    uint w,h;
+    tempbuffer.GetDimensions(w,h);
+    float2 texelSize = float2(1.0/w, 1.0/h);
+
+    float2 uv = input.xy * texelSize;
+    float4 origin = tempbuffer.Sample(sampler0, uv);
+    float4 color = float4(0,0,0,0);
+
+
+    float edge = linearstep(mask, 1, 1-origin.a);
+    float light = lightMap.Sample(sampler0, uv).r;
+    float4 edgeColor = float4(light, light, light, light);
+
+
+    return float4(edgeColor*edge);//出力用
+}
+]]
+
+--角度と光の強さ、そして距離で合成　一部にNormalFilterと同じ処理を入れる
+--[[pixelshader@PSMain:
+Texture2D Origin : register(t0);
+Texture2D lightMap : register(t1);
+Texture2D alphaMask : register(t2);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float strength;        //光の強さ
+    float light_bloom;     //光の指向性
+};
+float linearstep(float edge0, float edge1, float x){
+    return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
+}
+float DirectionFilter(float2 grad, float angle, float useAngle)
+{
+    float rad = radians(angle);
+    float2 dir = float2(cos(rad), sin(rad));
+    float d = (1 + dot(normalize(grad + 0.0001),dir))/2;
+    return lerp(1.0, d, useAngle); //同じ方向で1　直角で0.5　真逆で0
+}
+float4 PSMain(float4 input : SV_Position): SV_Target{
+    uint w,h;
+    Origin.GetDimensions(w,h);
+    float2 texelSize = float2(1.0/w, 1.0/h);
+
+    float2 uv = input.xy * texelSize;
+    float4 origin = Origin.Sample(sampler0, uv);
+    float4 color = float4(0,0,0,0);
+    
+    // 3x3近傍のαを取得：：光マップ
+    float a00 = lightMap.Sample(sampler0, uv + float2(-1,-1) * texelSize).a;
+    float a10 = lightMap.Sample(sampler0, uv + float2( 0,-1) * texelSize).a;
+    float a20 = lightMap.Sample(sampler0, uv + float2( 1,-1) * texelSize).a;
+    float a01 = lightMap.Sample(sampler0, uv + float2(-1, 0) * texelSize).a;
+    float a21 = lightMap.Sample(sampler0, uv + float2( 1, 0) * texelSize).a;
+    float a02 = lightMap.Sample(sampler0, uv + float2(-1, 1) * texelSize).a;
+    float a12 = lightMap.Sample(sampler0, uv + float2( 0, 1) * texelSize).a;
+    float a22 = lightMap.Sample(sampler0, uv + float2( 1, 1) * texelSize).a;
+
+    // Sobel勾配計算
+    float gx = -a00 - 2*a01 - a02 + a20 + 2*a21 + a22;
+    float gy = -a00 - 2*a10 - a20 + a02 + 2*a12 + a22;
+    float gradient = sqrt(gx*gx + gy*gy) / sqrt(32);
+    float3 Lnorm = normalize(float3(gx, gy, 1-light_bloom+0.01));
+
+    // 3x3近傍のαを取得：：アルファマップ
+    a00 = alphaMask.Sample(sampler0, uv + float2(-1,-1) * texelSize).r;
+    a10 = alphaMask.Sample(sampler0, uv + float2( 0,-1) * texelSize).r;
+    a20 = alphaMask.Sample(sampler0, uv + float2( 1,-1) * texelSize).r;
+    a01 = alphaMask.Sample(sampler0, uv + float2(-1, 0) * texelSize).r;
+    a21 = alphaMask.Sample(sampler0, uv + float2( 1, 0) * texelSize).r;
+    a02 = alphaMask.Sample(sampler0, uv + float2(-1, 1) * texelSize).r;
+    a12 = alphaMask.Sample(sampler0, uv + float2( 0, 1) * texelSize).r;
+    a22 = alphaMask.Sample(sampler0, uv + float2( 1, 1) * texelSize).r;
+
+    // Sobel勾配計算
+    float Mgx = -a00 - 2*a01 - a02 + a20 + 2*a21 + a22;
+    float Mgy = -a00 - 2*a10 - a20 + a02 + 2*a12 + a22;
+    float3 Mnorm = float3(normalize(float2(Mgx, Mgy)), 0);
+
+    /*
+    float3 n = normalize(float3(-gx, -gy, 1-light_bloom+0.01));
+    float3 NormalColor = (n * 0.5 + 0.5)*a00;
+    */
+
+    //とりあえず光の方向と境界のベクトルが噛み合っているかを測ろう
+    float StrNorm = dot(Mnorm, Lnorm);//裾野が長い光ほどこれの影響が強くなる なぜか逆転することになった　なんでだろう
+    //多分割り算だけだと裾野の広さが残ってしまってダメなのでmin0で引き算することになる
+    StrNorm = 0.5 + StrNorm * 0.5;
+    //それぞれの光の強さを測る
+    float StrAlp = alphaMask.Sample(sampler0, uv).a;
+    float StrLht = lightMap.Sample(sampler0, uv).a;
+    //StrNormに本当に傾きが無い時の扱いなどに難あり　nを何かしらの手法を使って使った方がいいかも
+    //目下の問題は法線の扱い　光の法線とアルファマップのぼかしの法線に合う場合は強く、そうでない時(線の法線が下(下にマスク面有)で光の法線が真上)は弱くしなければいけない
+    //真正面の法線は真正面とする　…とりあえずアルファマップのぼかしの法線は二次元でz成分を0固定として扱うぐらいで良さそう
+    //あとはぼかしを下げると法線の影響が下がるような操作性にしたい
+    float Backlit = StrAlp* StrLht* StrNorm *origin.a * strength;
+    return float4(Backlit, Backlit, Backlit, origin.a);
+
+}
+]]
+
+local function CauchyBlurAll(radius)
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, 0})
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, 45})
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, -45})
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, 90})
+end
+
+obj.copybuffer("cache:original","object")
+obj.load("figure","四角形",0xffffff,light_size,4000,false,light_xy)
+obj.effect("座標","X",light_x,"Y",light_y)
+local radius_local = radius_light * strength
+obj.effect("領域拡張","上",radius_local*6.0,"下",radius_local*6.0,"左",radius_local*6.0,"右",radius_local*6.0)
+if radius_local > 128 then
+    obj.effect("リサイズ","拡大率",25)
+    CauchyBlurAll(radius_local/2)
+    obj.effect("リサイズ","拡大率",400)
+elseif radius_local > 64 then
+    obj.effect("リサイズ","拡大率",50)
+    CauchyBlurAll(radius_local/2)
+    obj.effect("リサイズ","拡大率",200)
+else CauchyBlurAll(radius_local)
+end
+obj.effect("オフスクリーン描画")
+obj.copybuffer("cache:light","object")
+if preView == 1 then
+    obj.copybuffer("object","cache:original")
+    obj.pixelshader("NormalFilter","object",{"cache:light","cache:original"},{strength, light_bloom},"copy","clip")
+elseif preView == 2 then 
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask},"copy","loop")
+    if length > 60 then
+        obj.effect("リサイズ","拡大率",50)
+        CauchyBlurAll(length/2)
+        obj.effect("リサイズ","拡大率",200)
+    else CauchyBlurAll(length)
+    end
+else
+    obj.pixelshader("EmptyLightAndLightMap","object",{"cache:original", "cache:light"},{mask},"copy","loop")
+    if length > 60 then
+        obj.effect("リサイズ","拡大率",50)
+        CauchyBlurAll(length/2)
+        obj.effect("リサイズ","拡大率",200)
+    else CauchyBlurAll(length)
+    end
+end
+
+if preView == 0 then
+    obj.copybuffer("cache:AlphaMap","object")
+    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:AlphaMap"},{strength, light_bloom},"copy","loop")
+end
+
+

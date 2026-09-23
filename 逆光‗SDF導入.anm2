@@ -1,0 +1,288 @@
+--label:光効果
+--select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界ぼかし=2
+--group@光源の影響度
+--track@light_x:光源位置X,-2000,2000,0.0,0.1;
+--track@light_y:光源位置Y,-2000,2000,0.0,0.1;
+--track@light_size:光源サイズ,0,5000,1000,0.1;
+--track@light_xy:光源縦横比, -1.00, 1.00, 0, 0.01;
+--track@radius_light:光源の丸さ,0,100,0,0.01;
+--track@light_smt:光源の拡散,0,1000,0,0.1;
+--track@light_bloom:光の指向性,0,1.0,1.0,0.01;
+--track@strength:光の強さ,1,10.0,1,0.01;
+--track@mask:マスクの濃さ,0.0, 1.0, 0.0, 0.01;
+--group@逆光操作
+--track@length:光の距離, 0.0, 200.0, 0.0, 0.01;
+--color@col:色,0xffffff;
+--track@hueShift:色相_時間制御用,-360,360,0,0.1
+--track@saturateShift:彩度_時間制御用,-100,100,0,0.1
+--光源の丸さによってぼかし処理を入れる　一定以上の大きさの時は縮小してからぼかして再拡大
+--[[pixelshader@SDF_light:
+Texture2D tempbuffer : register(t0);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float light_size;   // half size in pixels
+    float light_x;      // offset from center (px)
+    float light_y;
+    float light_xy;     // aspect -1..1
+    float radius_light; // corner radius (px)
+    float light_bloom;
+    float light_smt;
+}
+
+float4 SDF_light(float4 pos : SV_Position) : SV_Target {
+    uint w, h;
+    tempbuffer.GetDimensions(w, h);
+
+    // everything in pixel space
+    float2 center = float2(w, h) * 0.5 + float2(light_x, light_y);
+    float2 p = pos.xy - center;
+
+    float2 halfSize = light_size * float2(
+        clamp(1.0 + light_xy, 0.01, 1.0),
+        clamp(1.0 - light_xy, 0.01, 1.0));
+
+    // radius must not exceed half size
+    float r = lerp(0.0, min(halfSize.x, halfSize.y), radius_light/100);
+
+    // rounded box SDF
+    float2 q = abs(p) - halfSize + r;
+    float d = min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+
+    float2 s = float2(p.x < 0 ? -1.0 : 1.0, p.y < 0 ? -1.0 : 1.0);
+    float2 g = (max(q.x, q.y) > 0.0)
+        ? normalize(max(q, 0.0))
+        : ((q.x > q.y) ? float2(1, 0) : float2(0, 1));
+    g *= s;
+
+    const float PI = 3.14159265;
+    float R = max(light_smt, 1e-3);
+    float t = max(d, 0.0) / R;          // 内側はすべて 0　
+    float L = rsqrt(1.0 + t * t);       // 内側 1.0、外に向かって減衰
+    float slope = t * L * L * L / 0.3849;    // dL/dd の大きさ = t / (R(1+t²)^1.5) t/(1+t^2)^1.5はピークをt=0.707で迎えるため1でピーク値が1になるように正規化する
+    float2 nxy = g * slope * light_bloom;
+    float nz = sqrt(saturate(1.0 - dot(nxy, nxy)));//必要になった時のためにz方向のベクトルの求め方をメモする
+    return float4(nxy * 0.5 + 0.5, L, 1);
+}
+]]
+
+--ブラー 念のため残してるだけ
+--[[pixelshader@CauchyBlur:
+Texture2D tempbuffer : register(t0);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float radius;
+    float angle;
+};
+float4 CauchyBlur(float4 pos : SV_Position): SV_Target{
+    uint w,h;
+    tempbuffer.GetDimensions(w,h);
+    float2 texelSize = float2(1.0/w, 1.0/h);
+    float2 uv = pos.xy * texelSize;
+
+    float4 result =  float4(0,0,0,0);
+
+    int samples = (int)(radius * 6.0);
+    samples = clamp(samples, (int)32, (int)256);
+    float pi = 3.1415926;
+    float rad = angle / 180 * pi;
+
+    float totalW = 0.0;
+    if(radius < 1e-4)return tempbuffer.Sample(sampler0, uv);
+    for(int i = (-1 * samples); i <= samples; i++){
+        float2 offset = float2(
+            i * texelSize.x * cos(rad), 
+            i * sin(rad) * texelSize.y
+            );
+        float2 sampleUV = uv + offset;
+        float inside = (all(sampleUV >= 0.0) && all(sampleUV <= 1.0)) ? 1.0 : 0.0;
+        float dist = abs(float(i))/radius;
+        float weight = 1.0 / (dist * dist + 1.0);
+        result += tempbuffer.Sample(sampler0, sampleUV) * weight * inside;
+        totalW += weight;
+    }
+    result /= totalW;
+    return result;
+
+}
+]]
+
+--[[pixelshader@JFA_AlphaMapSeed:
+Texture2D tempbuffer : register(t0);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float mask;        //閾値(0.0 ~ 1.0)
+};
+float4 JFA_AlphaMapSeed(float4 input : SV_Position): SV_Target{
+    int2 p = int2(input.xy);
+    float a = tempbuffer.Load(int3(p, 0)).a;
+    float seed = (a < mask) ? 1.0 : 0.0;
+    return float4(128.0/255.0, 128.0/255.0, seed, 1);
+}
+]]
+
+--[[pixelshader@JFA_AlphaMapStep:
+Texture2D tempbuffer : register(t0);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float stepSize;
+};
+float4 JFA_AlphaMapStep(float4 input : SV_Position): SV_Target{
+uint w, h;
+    tempbuffer.GetDimensions(w, h);
+    int2 p = int2(input.xy);
+    int s = (int)stepSize;
+
+    float bestD = 1e9;
+    int2  bestOff = int2(0, 0);
+    float found = 0;
+
+    [unroll] for (int y = -1; y <= 1; y++)
+    [unroll] for (int x = -1; x <= 1; x++) {
+        int2 n = p + int2(x, y) * s;
+        if (n.x < 0 || n.y < 0 || n.x >= (int)w || n.y >= (int)h) continue;
+
+        float4 t = tempbuffer.Load(int3(n, 0));
+        if (t.b < 0.5) continue;                          // n はまだ何も知らない
+
+        int2 off  = int2(round(t.rg * 255.0)) - 128;       // n から見たシード
+        int2 cand = off + (n - p);                         // p から見たシード
+        if (abs(cand.x) > 127 || abs(cand.y) > 127) continue;
+
+        float d = dot(float2(cand), float2(cand));
+        if (d < bestD) { bestD = d; bestOff = cand; found = 1; }
+    }
+    return float4(float2(bestOff + 128) / 255.0, found, 1);
+}
+]]
+--[[pixelshader@JFA_AlphaMapEnd:
+Texture2D tempbuffer : register(t0);
+cbuffer constant0 : register(b0){ float maxDist; };
+
+float4 JFA_AlphaMapEnd(float4 input : SV_Position) : SV_Target {
+    float4 t = tempbuffer.Load(int3(int2(input.xy), 0));
+    float2 off = round(t.rg * 255.0) - 128.0;
+    float  d   = (t.b > 0.5) ? length(off) : maxDist;     // 見つからなければ遠い扱い
+    float2 dir = (d > 0.5) ? off / d : float2(0, 0);      // 空白上（d=0）は方向なし
+    return float4(dir * 0.5 + 0.5, saturate(d / maxDist), 1);
+}
+]]
+
+--角度と光の強さ、そして距離で合成　一部にNormalFilterと同じ処理を入れる
+--[[pixelshader@PSMain:
+Texture2D Origin : register(t0);
+Texture2D lightMap : register(t1);
+Texture2D alphaMap : register(t2);
+SamplerState sampler0 : register(s0);
+cbuffer constant0 : register(b0){
+    float strength;        //光の強さ
+    float lightLen;
+    float depthScale;
+    float colR, colG, colB;
+    float hueShift;     // -360..360
+    float satShift;     // -100..100
+};
+float linearstep(float edge0, float edge1, float x){
+    return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
+}
+
+float3 rgb2hsv(float3 c){
+    float4 K = float4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+    float4 p = lerp(float4(c.bg, K.wz), float4(c.gb, K.xy), step(c.b, c.g));
+    float4 q = lerp(float4(p.xyw, c.r), float4(c.r, p.yzx), step(p.x, c.r));
+    float d = q.x - min(q.w, q.y);
+    return float3(abs(q.z + (q.w - q.y) / (6.0 * d + 1e-10)), d / (q.x + 1e-10), q.x);
+}
+float3 hsv2rgb(float3 c){
+    float4 K = float4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+    float3 p = abs(frac(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * lerp(K.xxx, saturate(p - K.xxx), c.y);
+}
+
+float4 PSMain(float4 input : SV_Position): SV_Target{
+    uint w, h;
+    Origin.GetDimensions(w, h);
+    float2 uv = input.xy / float2(w, h);
+
+    float4 origin = Origin.Sample(sampler0, uv);
+    float4 lm     = lightMap.Sample(sampler0, uv);
+    float4 am     = alphaMap.Sample(sampler0, uv);
+
+    // maps are premultiplied : restore straight values
+    lm.rgb = (lm.a > 1e-4) ? lm.rgb / lm.a : lm.rgb;
+    am.rgb = (am.a > 1e-4) ? am.rgb / am.a : am.rgb;
+
+    // light : direction away from the source, length = directionality
+    float2 lightVec = lm.rg * 2.0 - 1.0;
+    float  lvLen    = length(lightVec);
+    float  dirAmount = saturate(lvLen); //基本1~0に収まるが例外を阻止
+    float2 toLight  = (lvLen > 1e-4) ? (-lightVec / lvLen) : float2(0.0, 0.0);
+
+    // silhouette : outward normal and depth from the edge
+    float2 edgeN = am.rg * 2.0 - 1.0;
+    float  enLen = length(edgeN);
+    edgeN = (enLen > 1e-4) ? edgeN / enLen : float2(0.0, 0.0);
+    float  depth = am.b * depthScale;
+
+    // 光に対してどの程度向き合えているのかを確認する　光の方向が正面に近い程1.0に近くなる
+    float facing = lerp(1.0, saturate(dot(edgeN, toLight)), dirAmount);
+
+    float rim = 1.0 - linearstep(0.0, lightLen, depth);
+    rim *= rim;
+
+    float3 hsv = rgb2hsv(float3(colR, colG, colB));
+    hsv.x = frac(hsv.x + hueShift / 360.0);
+    hsv.y = saturate(hsv.y + satShift / 100.0);
+    float3 tint = hsv2rgb(hsv);
+
+    float3 glow = tint * (lm.b * facing * rim * strength);
+
+    float4 color;
+    color.rgb = origin.rgb + glow * origin.a;   // keep premultiplied
+    color.a   = origin.a;
+    return color;
+}
+]]
+
+JFA_MAX = 256;
+
+local function CauchyBlurAll(radius)
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, 0})
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, 45})
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, -45})
+    obj.pixelshader("CauchyBlur","object",{"object"},{radius, 90})
+end
+
+local colR = math.floor(col / 65536) % 256 / 255
+local colG = math.floor(col / 256) % 256 / 255
+local colB = col % 256 / 255
+
+obj.copybuffer("cache:original","object")
+obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_smt},"copy","clip")
+obj.copybuffer("cache:light","object")
+if preView == 1 then
+    --既に法線マップという形で出力済みなため何もしなくていい
+else
+    obj.pixelshader("JFA_AlphaMapSeed","object",{"cache:original"},{mask},"copy","loop")
+    obj.effect("リサイズ","拡大率",50)
+    
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{256},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{128},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{64},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{32},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{16},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{8},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{4},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{2},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapStep","object",{"object"},{1},"copy","loop")
+    obj.pixelshader("JFA_AlphaMapEnd","object",{"object"},{256},"copy","loop")
+    obj.effect("ぼかし","範囲",30,"サイズ固定",1)
+    obj.effect("リサイズ","拡大率",200)
+end
+
+if preView == 0 then
+    obj.copybuffer("cache:AlphaMap","object")
+    obj.pixelshader("PSMain","object",
+        {"cache:original","cache:light","cache:AlphaMap"},
+        {strength, length, JFA_MAX * 2, colR, colG, colB, hueShift, saturateShift},
+        "copy","clip")
+end
