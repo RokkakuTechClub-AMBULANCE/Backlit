@@ -5,21 +5,21 @@
 --track@light_size:光源サイズ,0,5000,1000,0.1;
 --track@light_xy:光源縦横比, -1.00, 1.00, 0, 0.01;
 --track@radius_light:光源の丸さ,0,1000,0,0.01;
---track@light_bloom:光源までの距離,0,5000,1.0,0.01;
+--track@light_bloom:光源の遠さ,0,1500,1.0,0.01;
 --track@light_scater:光の拡散,0,10,5.0, 0.01;
 --group:境界ノーマル取得手法
 --track@mask:マスクの濃さ,0.0, 1.0, 0.0, 0.01;
 --track@seed:シード値,0.0, 100, 0.0, 0.01;
 --track@noise:ノイズの導入, 0.0, 100, 0.0, 0.01;
 --group:デバッグ用設定
---track@length:サンプル距離,0.0, 200.0, 0.0, 0.01;
+--track@length:サンプル距離,0.0, 1000.0, 100.0, 0.01;
 --select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界プレビュー=2, 光の角度固定=3
 --track@lightDir:角度固定時の光角度, -360.0, 360.0, 0, 0.01;
 --group:撮影用設定
 --track@strength:光の強さ,0.0, 100.0, 0.0, 0.01;
 --track@blur:リム/回り込み比,-100.0, 100.0, 0.0, 0.01;
 --track@limStr:リムライトの幅,0.0, 100.0, 0.0, 0.01;
---track@blurleng:回り込み幅,0.0, 1000.0, 100.0, 0.01;
+--track@blurleng:回り込み幅,0.0, 200.0, 100.0, 0.01;
 --color@col:色,0xffffff;
 --track@hueShift:色相_時間制御用,-360,360,0,0.1
 --track@saturateShift:彩度_時間制御用,-100,100,0,0.1
@@ -35,7 +35,7 @@
         float light_y;
         float light_xy;     // aspect -1..1
         float radius_light; // corner radius (px)
-        float light_bloom;  //光の広がり
+        float light_bloom;  //光の広がり_被写体から光源までの距離を想定
     }
 
     float4 SDF_light(float4 pos : SV_Position) : SV_Target {
@@ -47,7 +47,10 @@
         float2 center = float2(w, h) * 0.5 + float2(light_x, light_y);
         float2 p = pos.xy - center;
 
-        float2 halfSize = light_size * float2(
+        const float Z0 = 200;       //被写体とカメラの距離を想定
+        float light_lookSize = light_size * Z0 / (Z0 + light_bloom);
+
+        float2 halfSize = light_lookSize * float2(
             clamp(1.0 + light_xy, 0.01, 1.0),
             clamp(1.0 - light_xy, 0.01, 1.0));
 
@@ -72,8 +75,8 @@
         float sinT = dOut * invL;      // 水平成分 → 傾きの大きさ
         float cosT = b * invL;         // 鉛直成分
         float sloop = cosT * cosT;     // = 1/(1+(d/b)^2)
-
-        return float4(g * sinT * 0.5 + 0.5, sloop, 1);
+        float damp = 1 / (1+(light_bloom/1000)*(light_bloom/1000));
+        return float4(g * sinT * 0.5 + 0.5, sloop * damp, 1);
     }
 ]]
 
@@ -194,7 +197,7 @@
         float2 texelSize = float2(1.0/w, 1.0/h);
         float2 uv = input.xy * texelSize;
 
-        float radius = 10.0;
+        const float radius = 10.0;
 
         float sigma_space = float(radius) / 3.0;
         float sigma_color = (1.0 - detail / 100.0) * 0.3 + 0.01;
@@ -296,6 +299,8 @@
         float4 color = float4(0,0,0,0);
 
         return float4(1,0,1,1);
+
+
         /*
         // 3x3近傍のαを取得：：光マップ
         float a00 = lightMap.Sample(sampler0, uv + float2(-1,-1) * texelSize).a;
@@ -379,11 +384,19 @@ if preView == 0 then
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
     obj.copybuffer("cache:limMap", "object")
     --この辺りで回り込みの広さ、blurlengthを求める式を入れる　あとでこれで実際に動かして塩梅を探りたい
-    local blurlength = blurleng/100 * (light_size * (1.0 - math.abs(light_xy))) / light_bloom
-    obj.pixelshader("EmptyLight","object",{"cache:Blurinal"},{mask, seed, blurlength},"copy","mirror")
+    --blurlength:0~100~1000 light_size:0~5000(半径)
+    local Z0 = 200;       --被写体とカメラの距離を想定
+    local light_lookSize = light_size * Z0 / (Z0 + light_bloom);
+    local halfSizeX = light_lookSize * math.min(math.max(1.0 + light_xy, 0.01), 1.0);
+    local halfSizeY = light_lookSize * math.min(math.max(1.0 - light_xy, 0.01), 1.0);
+    local r = math.max(0.0, math.min(radius_light, math.min(halfSizeX, halfSizeY)))
+    local area = 4.0 * halfSizeX * halfSizeY - (4.0 - math.pi)* r * r
+    local s_eff = math.sqrt(max(area, 1e-3));
+    local sigma_warp = blurleng / 100 * s_eff / max(light_dist, 1e-5)   --回り込みの広さ
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_warp},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
     obj.copybuffer("cache:blurMap", "object")
-    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:limMap","cache:blurMap"},{strength, blur, limStr, blurleng},"copy","loop")
+    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:limMap","cache:blurMap"},{strength, blur, limStr, blurlength},"copy","loop")
 end
 
 
