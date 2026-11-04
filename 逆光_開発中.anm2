@@ -7,6 +7,7 @@
 --track@radius_light:光源の丸さ,0,1000,0,0.01;
 --track@light_bloom:光源の遠さ,0,1500,1.0,0.01;
 --track@light_scater:光の拡散,0,10,5.0, 0.01;
+--track@light_damp:距離減衰,0,100,0,0.01;
 --group:境界ノーマル取得手法
 --track@mask:マスクの濃さ,0.0, 1.0, 0.0, 0.01;
 --track@seed:シード値,0.0, 100, 0.0, 0.01;
@@ -36,6 +37,7 @@
         float light_xy;     // aspect -1..1
         float radius_light; // corner radius (px)
         float light_bloom;  //光の広がり_被写体から光源までの距離を想定
+        float light_damp;
     }
 
     float4 SDF_light(float4 pos : SV_Position) : SV_Target {
@@ -75,7 +77,8 @@
         float sinT = dOut * invL;      // 水平成分 → 傾きの大きさ
         float cosT = b * invL;         // 鉛直成分
         float sloop = cosT * cosT;     // = 1/(1+(d/b)^2)
-        float damp = 1 / (1+(light_bloom/1000)*(light_bloom/1000));
+        float damp = light_size*light_size / (light_size*light_size + light_bloom*light_bloom);
+        damp = lerp(1, damp, light_damp);
         return float4(g * sinT * 0.5 + 0.5, sloop * damp, 1);
     }
 ]]
@@ -363,7 +366,7 @@ local function CauchyBlurAll(radius)
 end
 
 obj.copybuffer("cache:original","object")
-obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom},"copy","clip")
+obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_damp/100},"copy","clip")
 CauchyBlurAll(light_scater * light_bloom / 20)
 --ここで値が整数固定になってしまうので
 obj.copybuffer("cache:light","object")
