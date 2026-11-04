@@ -41,7 +41,6 @@
     }
 
     float4 SDF_light(float4 pos : SV_Position) : SV_Target {
-    //今後ここの傾きの行き来が急なのを改善しなければいけない
         uint w, h;
         tempbuffer.GetDimensions(w, h);
 
