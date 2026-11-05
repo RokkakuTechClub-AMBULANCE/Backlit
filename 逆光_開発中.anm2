@@ -14,7 +14,7 @@
 --track@noise:ノイズの導入, 0.0, 100, 0.0, 0.01;
 --group:デバッグ用設定
 --track@length:サンプル距離,0.0, 1000.0, 100.0, 0.01;
---select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界プレビュー=2, 光の角度固定=3
+--select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界プレビュー_リム=2, 境界プレビュー_回り込み=3, 光の角度固定=4
 --track@lightDir:角度固定時の光角度, -360.0, 360.0, 0, 0.01;
 --group:撮影用設定
 --track@strength:光の強さ,0.0, 3.0, 0.0, 0.01;
@@ -412,13 +412,29 @@ obj.copybuffer("cache:original","object")
 obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_damp/100},"copy","clip")
 CauchyBlurAll(light_scater * light_bloom / 20)
 obj.copybuffer("cache:light","object")
+
+--この辺りで回り込みの広さ、blurlengthを求める式を入れる　あとでこれで実際に動かして塩梅を探りたい
+--blurlength:0~100~1000 light_size:0~5000(半径)
+local Z0 = 200;       --被写体とカメラの距離を想定
+local light_lookSize = light_size * Z0 / (Z0 + light_bloom);
+local halfSizeX = light_lookSize * math.min(math.max(1.0 + light_xy, 0.01), 1.0);
+local halfSizeY = light_lookSize * math.min(math.max(1.0 - light_xy, 0.01), 1.0);
+local r = math.max(0.0, math.min(radius_light, math.min(halfSizeX, halfSizeY)))
+local area = 4.0 * halfSizeX * halfSizeY - (4.0 - math.pi)* r * r
+local s_eff = math.sqrt(math.max(area, 0.001))      --距離減衰も含めた近似的な光の直径
+local sinA = s_eff / math.sqrt(s_eff * s_eff + light_bloom * light_bloom)
+local sigma_wrap = (sigma_rim + blurleng) * sinA
+
 if preView == 1 then
     
 elseif preView == 2 then 
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, length},"copy","mirror")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim},"copy","mirror")
+    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
+elseif preView == 3 then
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
 else
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, length},"copy","mirror")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
     obj.copybuffer("cache:AlphaMap", "object")
     obj.pixelshader("LightDir","object",{"cache:original", "cache:AlphaMap"},{length, lightDir / 180 * math.pi},"copy","clip")
@@ -428,17 +444,7 @@ if preView == 0 then
     obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
     obj.copybuffer("cache:rimMap", "object")
-    --この辺りで回り込みの広さ、blurlengthを求める式を入れる　あとでこれで実際に動かして塩梅を探りたい
-    --blurlength:0~100~1000 light_size:0~5000(半径)
-    local Z0 = 200;       --被写体とカメラの距離を想定
-    local light_lookSize = light_size * Z0 / (Z0 + light_bloom);
-    local halfSizeX = light_lookSize * math.min(math.max(1.0 + light_xy, 0.01), 1.0);
-    local halfSizeY = light_lookSize * math.min(math.max(1.0 - light_xy, 0.01), 1.0);
-    local r = math.max(0.0, math.min(radius_light, math.min(halfSizeX, halfSizeY)))
-    local area = 4.0 * halfSizeX * halfSizeY - (4.0 - math.pi)* r * r
-    local s_eff = math.sqrt(math.max(area, 0.001))      --距離減衰も含めた近似的な光の直径
-    local sinA = s_eff / math.sqrt(s_eff * s_eff + light_bloom * light_bloom)
-    local sigma_wrap = (sigma_rim + blurleng) * sinA
+
     obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
     obj.copybuffer("cache:blurMap", "object")
