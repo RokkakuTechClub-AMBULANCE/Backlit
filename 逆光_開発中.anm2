@@ -17,15 +17,14 @@
 --select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界プレビュー=2, 光の角度固定=3
 --track@lightDir:角度固定時の光角度, -360.0, 360.0, 0, 0.01;
 --group:撮影用設定
---track@strength:光の強さ,0.0, 100.0, 0.0, 0.01;
---track@blur:リム/回り込み比,-100.0, 100.0, 0.0, 0.01;
---track@limStr:リムライトの幅,0.0, 100.0, 0.0, 0.01;
---track@blurleng:回り込み幅,0.0, 200.0, 100.0, 0.01;
---color@col:色,0xffffff;
+--track@strength:光の強さ,0.0, 3.0, 0.0, 0.01;
+--track@rimVSwrap:リム/回り込み比,-100.0, 100.0, 0.0, 0.01;
+--track@sigma_rim:リムライトの幅,0.0, 100.0, 20.0, 0.01;
+--track@blurleng:回り込み幅,100.0, 5000.0, 2500.0, 0.01;
+--color@rim_col:リムカラーの色,0xffffff;
 --track@hueShift:色相_時間制御用,-360,360,0,0.1
 --track@saturateShift:彩度_時間制御用,-100,100,0,0.1
---光源の丸さによってぼかし処理を入れる　一定以上の大きさの時は縮小してからぼかして再拡大
---境界ノーマル取得手法のcheck@censeNoise:ノイズを無くす,false;がなぜかエラーを起こす　この機にブラーの半径を導入するとするか
+--color@wrap_col:回り込みの色,0xffffff;
 
 --[[pixelshader@SDF_light:
     Texture2D tempbuffer : register(t0);
@@ -274,12 +273,14 @@
 --[[pixelshader@PSMain:
     Texture2D Origin : register(t0);
     Texture2D lightMap : register(t1);
-    Texture2D limMask : register(t2);
-    Texture2D blurMask : register(t3);
+    Texture2D rimMask : register(t2);
+    Texture2D wrapMask : register(t3);
     SamplerState sampler0 : register(s0);
     cbuffer constant0 : register(b0){
         float strength;        //光の強さ
-        float light_bloom;     //光の指向性
+        float rimVSwrap;
+        float rimR, rimG, rimB;
+        float wrapR, wrapG, wrapB;
     };
     float linearstep(float edge0, float edge1, float x){
         return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
@@ -291,6 +292,26 @@
         float d = (1 + dot(normalize(grad + 0.0001),dir))/2;
         return lerp(1.0, d, useAngle); //同じ方向で1　直角で0.5　真逆で0
     }
+    
+    // O: r=右, g=下, b=左, a=上 の空き つまりwrap,rimMaskのやつ
+    // L: 光マップの rg を復号したもの（光の進行方向 × sinθ）
+    // 光の総量を1として正面と側面xyにどのような配分で分けられているかを三角関数を用いて計算する(ついでにwrap, rimMaskの重み計算もする)
+    //（復号とは　テクスチャに保存するために変換した値を元の意味の値に戻すこと テクスチャ化する上で必要な0~1から-1~1に戻した）
+    float Receive(float4 O, float2 L, float E)
+    {
+        float2 src = -L;              // 光源のある向き（進行方向の逆）
+        float2 s2  = src * src;       // x², y²  （sin²θ·cos²φ = x², sin²θ·sin²φ = y² x²+y²=sin²θ）
+
+        //それぞれの方角でどれだけ光を受けるかをwrap, rimMaskから調べる 
+        float side  = s2.x * (src.x > 0 ? O.r : O.b)
+                    + s2.y * (src.y > 0 ? O.g : O.a);
+
+        //真正面がどうなのかを調べる
+        float front = (1.0 - saturate(s2.x + s2.y)) * dot(O, 0.25);  // 真後ろ成分 × 4方向平均　(1.0 - saturate(s2.x + s2.y)) = cos²θ
+
+        return E * (side + front);
+    }
+
     float4 PSMain(float4 input : SV_Position): SV_Target{
             uint w,h;
         Origin.GetDimensions(w,h);
@@ -298,61 +319,25 @@
 
         float2 uv = input.xy * texelSize;
         float4 origin = Origin.Sample(sampler0, uv);
-        float4 color = float4(0,0,0,0);
+        float4 light = lightMap.Sample(sampler0, uv);
+        float4 rimMap = rimMask.Sample(sampler0, uv);
+        float4 wrapMap = wrapMask.Sample(sampler0, uv);
 
-        return float4(1,0,1,1);
+        float2 L = light.rg * 2.0 - 1.0;
+        float  E = light.b;                       // sloop × damp
 
+        float rim  = Receive(rimMap,  L,  E);
+        float wrap = Receive(wrapMap, L,  E);   // wrap_dir: 0〜1、回り込みの方向性を弱める
 
-        /*
-        // 3x3近傍のαを取得：：光マップ
-        float a00 = lightMap.Sample(sampler0, uv + float2(-1,-1) * texelSize).a;
-        float a10 = lightMap.Sample(sampler0, uv + float2( 0,-1) * texelSize).a;
-        float a20 = lightMap.Sample(sampler0, uv + float2( 1,-1) * texelSize).a;
-        float a01 = lightMap.Sample(sampler0, uv + float2(-1, 0) * texelSize).a;
-        float a21 = lightMap.Sample(sampler0, uv + float2( 1, 0) * texelSize).a;
-        float a02 = lightMap.Sample(sampler0, uv + float2(-1, 1) * texelSize).a;
-        float a12 = lightMap.Sample(sampler0, uv + float2( 0, 1) * texelSize).a;
-        float a22 = lightMap.Sample(sampler0, uv + float2( 1, 1) * texelSize).a;
+        float lit = strength * lerp(wrap, rim, rimVSwrap);  // rimVSwrap は 0〜1 に換算して渡す
+        float3 col = origin.rgb + lit * float3(wrapR, wrapG, wrapB);                       // 色はあとで light_color を掛ける
+        return float4(col, origin.a);
 
-        // Sobel勾配計算
-        float gx = -a00 - 2*a01 - a02 + a20 + 2*a21 + a22;
-        float gy = -a00 - 2*a10 - a20 + a02 + 2*a12 + a22;
-        float gradient = sqrt(gx*gx + gy*gy) / sqrt(32);
-        float3 Lnorm = normalize(float3(gx, gy, 1-light_bloom+0.01));
+        //デバッグ用
+        //return wrapMap;
+        //return rimMap;
+        //return float4(1,0,1,1);
 
-        // 3x3近傍のαを取得：：アルファマップ
-        a00 = alphaMask.Sample(sampler0, uv + float2(-1,-1) * texelSize).r;
-        a10 = alphaMask.Sample(sampler0, uv + float2( 0,-1) * texelSize).r;
-        a20 = alphaMask.Sample(sampler0, uv + float2( 1,-1) * texelSize).r;
-        a01 = alphaMask.Sample(sampler0, uv + float2(-1, 0) * texelSize).r;
-        a21 = alphaMask.Sample(sampler0, uv + float2( 1, 0) * texelSize).r;
-        a02 = alphaMask.Sample(sampler0, uv + float2(-1, 1) * texelSize).r;
-        a12 = alphaMask.Sample(sampler0, uv + float2( 0, 1) * texelSize).r;
-        a22 = alphaMask.Sample(sampler0, uv + float2( 1, 1) * texelSize).r;
-
-        // Sobel勾配計算
-        float Mgx = -a00 - 2*a01 - a02 + a20 + 2*a21 + a22;
-        float Mgy = -a00 - 2*a10 - a20 + a02 + 2*a12 + a22;
-        float3 Mnorm = float3(normalize(float2(Mgx, Mgy)), 0);
-
-        
-        //float3 n = normalize(float3(-gx, -gy, 1-light_bloom+0.01));
-        //float3 NormalColor = (n * 0.5 + 0.5)*a00;
-        
-        //とりあえず光の方向と境界のベクトルが噛み合っているかを測ろう
-        float StrNorm = dot(Mnorm, Lnorm);//裾野が長い光ほどこれの影響が強くなる なぜか逆転することになった　なんでだろう
-        //多分割り算だけだと裾野の広さが残ってしまってダメなのでmin0で引き算することになる
-        StrNorm = 0.5 + StrNorm * 0.5;
-        //それぞれの光の強さを測る
-        float StrAlp = alphaMask.Sample(sampler0, uv).a;
-        float StrLht = lightMap.Sample(sampler0, uv).a;
-        //StrNormに本当に傾きが無い時の扱いなどに難あり　nを何かしらの手法を使って使った方がいいかも
-        //目下の問題は法線の扱い　光の法線とアルファマップのぼかしの法線に合う場合は強く、そうでない時(線の法線が下(下にマスク面有)で光の法線が真上)は弱くしなければいけない
-        //真正面の法線は真正面とする　…とりあえずアルファマップのぼかしの法線は二次元でz成分を0固定として扱うぐらいで良さそう
-        //あとはぼかしを下げると法線の影響が下がるような操作性にしたい
-        float Backlit = StrAlp* StrLht* StrNorm *origin.a * strength;
-        return float4(Backlit, Backlit, Backlit, origin.a);
-        */
         
     }
 ]]
@@ -363,11 +348,69 @@ local function CauchyBlurAll(radius)
     obj.pixelshader("CauchyBlur","object",{"object"},{radius, -45})
     obj.pixelshader("CauchyBlur","object",{"object"},{radius, 90})
 end
+-- RGB → HSV
+local function RGBtoHSV(r, g, b)
+    r, g, b = r/255, g/255, b/255
+    local max = math.max(r, g, b)
+    local min = math.min(r, g, b)
+    local delta = max - min
+
+    local h, s, v
+    v = max
+
+    if max == 0 then
+        s = 0
+    else
+        s = delta / max
+    end
+
+    if delta == 0 then
+        h = 0
+    elseif max == r then
+        h = (g - b) / delta % 6
+    elseif max == g then
+        h = (b - r) / delta + 2
+    else
+        h = (r - g) / delta + 4
+    end
+
+    h = h * 60 -- 0〜360に変換
+
+    return h, s, v
+end
+
+-- HSV → RGB
+local function HSVtoRGB(h, s, v)
+    if s == 0 then
+        local val = math.floor(v * 255)
+        return val, val, val
+    end
+
+    h = h / 60
+    local i = math.floor(h)
+    local f = h - i
+    local p = v * (1 - s)
+    local q = v * (1 - s * f)
+    local t = v * (1 - s * (1 - f))
+
+    local r, g, b
+    if     i == 0 then r, g, b = v, t, p
+    elseif i == 1 then r, g, b = q, v, p
+    elseif i == 2 then r, g, b = p, v, t
+    elseif i == 3 then r, g, b = p, q, v
+    elseif i == 4 then r, g, b = t, p, v
+    else               r, g, b = v, p, q
+    end
+
+    return math.floor(r*255), math.floor(g*255), math.floor(b*255)
+end
+
+local rimR, rimG, rimB = RGB(rim_col)
+local wrapR, wrapG, wrapB = RGB(wrap_col)
 
 obj.copybuffer("cache:original","object")
 obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_damp/100},"copy","clip")
 CauchyBlurAll(light_scater * light_bloom / 20)
---ここで値が整数固定になってしまうので
 obj.copybuffer("cache:light","object")
 if preView == 1 then
     
@@ -382,9 +425,9 @@ else
 end
 
 if preView == 0 then
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, limStr},"copy","mirror")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
-    obj.copybuffer("cache:limMap", "object")
+    obj.copybuffer("cache:rimMap", "object")
     --この辺りで回り込みの広さ、blurlengthを求める式を入れる　あとでこれで実際に動かして塩梅を探りたい
     --blurlength:0~100~1000 light_size:0~5000(半径)
     local Z0 = 200;       --被写体とカメラの距離を想定
@@ -393,12 +436,13 @@ if preView == 0 then
     local halfSizeY = light_lookSize * math.min(math.max(1.0 - light_xy, 0.01), 1.0);
     local r = math.max(0.0, math.min(radius_light, math.min(halfSizeX, halfSizeY)))
     local area = 4.0 * halfSizeX * halfSizeY - (4.0 - math.pi)* r * r
-    local s_eff = math.sqrt(max(area, 1e-3));
-    local sigma_warp = blurleng / 100 * s_eff / max(light_dist, 1e-5)   --回り込みの広さ
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_warp},"copy","mirror")
+    local s_eff = math.sqrt(math.max(area, 0.001))      --距離減衰も含めた近似的な光の直径
+    local sinA = s_eff / math.sqrt(s_eff * s_eff + light_bloom * light_bloom)
+    local sigma_wrap = (sigma_rim + blurleng) * sinA
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
     obj.copybuffer("cache:blurMap", "object")
-    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:limMap","cache:blurMap"},{strength, blur, limStr, blurlength},"copy","loop")
+    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:rimMap","cache:blurMap"},{strength, rimVSwrap /200 + 0.5, rimR/255, rimG/255, rimB/255, wrapR/255, wrapG/255, wrapB/255},"copy","loop")
 end
 
-
+--展望　ライトの光そのものの丸さ(丸くなかったらスポットライト　丸かったら電球　真横に合っても(つまりlight_bloomがかなり低くても)方位のある光として照らす)を実装する(時間と必要があれば)
