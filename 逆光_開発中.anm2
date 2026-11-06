@@ -329,8 +329,11 @@
         float rim  = Receive(rimMap,  L,  E);
         float wrap = Receive(wrapMap, L,  E);   // wrap_dir: 0〜1、回り込みの方向性を弱める
 
-        float lit = strength * lerp(wrap, rim, rimVSwrap);  // rimVSwrap は 0〜1 に換算して渡す
-        float3 col = origin.rgb + lit * float3(wrapR, wrapG, wrapB);                       // 色はあとで light_color を掛ける
+        float3 rimLight = rim * (1 - rimVSwrap) * float3(rimR, rimG, rimB);
+        float3 wrapLight = wrap * rimVSwrap * float3(wrapR, wrapG, wrapB);
+
+        //float lit = strength * lerp(wrap, rim, rimVSwrap);  // rimVSwrap は 0〜1 に換算して渡す
+        float3 col = origin.rgb + rimLight + wrapLight;                       // 色はあとで light_color を掛ける
         return float4(col, origin.a);
 
         //デバッグ用
