@@ -5,6 +5,7 @@
 --track@light_size:光源サイズ,0,5000,1000,0.1;
 --track@light_xy:光源縦横比, -1.00, 1.00, 0, 0.01;
 --track@radius_light:光源の形状の丸さ,0,1000,0,0.01;
+--track@light_roundness:光の丸み,0,100,0,0.01;
 --track@light_bloom:光源の遠さ,0,1500,700.0,0.01;
 --track@light_scater:光の拡散,0,10,5.0, 0.01;
 --track@light_damp:距離減衰,0,100,0,0.01;
@@ -37,6 +38,7 @@
         float radius_light; // corner radius (px)
         float light_bloom;  //光の広がり_被写体から光源までの距離を想定
         float light_damp;
+        float light_roundness;
     }
 
     float4 SDF_light(float4 pos : SV_Position) : SV_Target {
@@ -55,7 +57,7 @@
             clamp(1.0 - light_xy, 0.01, 1.0));
 
         // radius must not exceed half size
-        float r = clamp(radius_light, 0.0, min(halfSize.x, halfSize.y));
+        float r = clamp(radius_light * (light_lookSize / light_size), 0.0, min(halfSize.x, halfSize.y));
 
         // rounded box SDF
         float2 q = abs(p) - halfSize + r;   //ここで図形の大元からの距離とベクトルが決まる
@@ -75,8 +77,20 @@
         float sinT = dOut * invL;      // 水平成分 → 傾きの大きさ
         float cosT = b * invL;         // 鉛直成分
         float sloop = cosT * cosT;     // = 1/(1+(d/b)^2)
+
+        // 円形の部分に丸みを持たせて光に角度を付けることを図る この時qとrの比を用いる
+        // 課題点：この場合、高さbが反映されない
+
+        float qLeng = length(min(0, q));
+        if(d < 0 && qLeng > 0){
+            float cosM = qLeng / r;
+            float 
+
+        }
+
         float damp = light_size*light_size / (light_size*light_size + light_bloom*light_bloom);
         damp = lerp(1, damp, light_damp);
+
         return float4(g * sinT * 0.5 + 0.5, sloop * damp, 1);
     }
 ]]
@@ -415,7 +429,7 @@ local rimR, rimG, rimB = RGB(rim_col)
 local wrapR, wrapG, wrapB = RGB(wrap_col)
 
 obj.copybuffer("cache:original","object")
-obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_damp/100},"copy","clip")
+obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_damp/100, light_roundness/100},"copy","clip")
 CauchyBlurAll(light_scater * light_bloom / 20)
 obj.copybuffer("cache:light","object")
 
