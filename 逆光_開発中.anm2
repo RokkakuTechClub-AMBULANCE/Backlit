@@ -20,7 +20,7 @@
 --group:撮影用設定
 --track@strength:光の強さ,0.0, 10.0, 2.50, 0.01;
 --track@rimVSwrap:リム/回り込み比,-100.0, 100.0, 0.0, 0.01;
---track@sigma_rim:リムライトの幅,0.0, 100.0, 20.0, 0.01;
+--track@sigma_rim:リムライトの幅,0.0, 300.0, 150.0, 0.01;
 --track@blurleng:回り込み幅,100.0, 5000.0, 1000.0, 0.01;
 --color@rim_col:リムカラーの色,0xffffff;
 --track@hueShift:色相_時間制御用,-360,360,0,0.1
@@ -70,28 +70,45 @@
             : ((q.x > q.y) ? float2(1, 0) : float2(0, 1));
         g *= s;
 
+        // 丸みの幅。角丸半径 r までに制限する（理由は下記）
+        float R = light_roundness * r;
+
+        // 縁(d=0)を中心に、-R〜+R でなめらかに立ち上がる距離
+        // d ≤ -R → 0、 d ≥ R → d（従来と完全に一致）、間は2次曲線でつなぐ
+        float x  = d + R;                               //従来だとdに固定だった　図形の大元からの距離とdの間をlight_roundnessで取り持ったもの
+        float dS = (R < 1e-5) ? max(d, 0.0)
+                : (x <= 0.0 ? 0.0
+                : (x < 2.0 * R ? x * x / (4.0 * R) : d));       //不明点がここ
+
+        float b    = max(light_bloom, 1e-5);            //高さ　距離
+        float invS = rsqrt(dS * dS + b * b);            //直角三角形の斜めの辺の長さで1を割ってるやつ
+        float sinT = dS * invS;                         // 方向（丸み込み）
+
+        // 強さは実際の縁からの距離で（光源の内側は 1 のまま）
+        float dOut  = max(d, 0.0);
+        float sloop = b * b / (dOut * dOut + b * b);    //cosT*cosT = (b / sqrt(dOut * dOut + b * b))^2
+
+        float damp = light_size * light_size / (light_size * light_size + light_bloom * light_bloom);
+        damp = lerp(1, damp, light_damp);
+
+        return float4(g * sinT * 0.5 + 0.5, sloop * damp, 1);
+
+/*      旧コード
         // 高さ b の光源として仰角を求める
-        float dOut = max(d, 0.0);
+        float dOut = max(d, 0.0);       //図形から点までの距離　内側は全部0
         float b    = max(light_bloom, 1e-5);
         float invL = rsqrt(dOut * dOut + b * b);        //角度　直角三角形の斜めの辺で1を割ってるような値
         float sinT = dOut * invL;      // 水平成分 → 傾きの大きさ
         float cosT = b * invL;         // 鉛直成分
         float sloop = cosT * cosT;     // = 1/(1+(d/b)^2)
 
-        // 円形の部分に丸みを持たせて光に角度を付けることを図る この時qとrの比を用いる
-        // 課題点：この場合、高さbが反映されない
 
-        float qLeng = length(min(0, q));
-        if(d < 0 && qLeng > 0){
-            float cosM = qLeng / r;
-            float 
-
-        }
 
         float damp = light_size*light_size / (light_size*light_size + light_bloom*light_bloom);
         damp = lerp(1, damp, light_damp);
 
         return float4(g * sinT * 0.5 + 0.5, sloop * damp, 1);
+*/
     }
 ]]
 
