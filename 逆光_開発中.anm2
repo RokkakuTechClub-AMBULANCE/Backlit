@@ -4,8 +4,8 @@
 --track@light_y:光源位置Y,-2000,2000,0.0,0.1;
 --track@light_size:光源サイズ,0,5000,1000,0.1;
 --track@light_xy:光源縦横比, -1.00, 1.00, 0, 0.01;
---track@radius_light:光源の丸さ,0,1000,0,0.01;
---track@light_bloom:光源の遠さ,0,1500,1.0,0.01;
+--track@radius_light:光源の形状の丸さ,0,1000,0,0.01;
+--track@light_bloom:光源の遠さ,0,1500,700.0,0.01;
 --track@light_scater:光の拡散,0,10,5.0, 0.01;
 --track@light_damp:距離減衰,0,100,0,0.01;
 --group:境界ノーマル取得手法
@@ -17,10 +17,10 @@
 --select@preView:プレビュー,撮影=0, 光のノーマルと位置描画=1, 境界プレビュー_リム=2, 境界プレビュー_回り込み=3, 光の角度固定=4
 --track@lightDir:角度固定時の光角度, -360.0, 360.0, 0, 0.01;
 --group:撮影用設定
---track@strength:光の強さ,0.0, 3.0, 0.0, 0.01;
+--track@strength:光の強さ,0.0, 10.0, 2.50, 0.01;
 --track@rimVSwrap:リム/回り込み比,-100.0, 100.0, 0.0, 0.01;
 --track@sigma_rim:リムライトの幅,0.0, 100.0, 20.0, 0.01;
---track@blurleng:回り込み幅,100.0, 5000.0, 2500.0, 0.01;
+--track@blurleng:回り込み幅,100.0, 5000.0, 1000.0, 0.01;
 --color@rim_col:リムカラーの色,0xffffff;
 --track@hueShift:色相_時間制御用,-360,360,0,0.1
 --track@saturateShift:彩度_時間制御用,-100,100,0,0.1
@@ -130,6 +130,7 @@
         float mask;
         float seed;
         float lightLen;
+        float disksize;
     };
     float linearstep(float edge0, float edge1, float x){
         return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
@@ -151,8 +152,8 @@
         float4 sumDir = 0;
         float4 sumWeight = 0;  //範囲外を除外するためと最大値を1にするために重みの合計値が必要
 
-        [loop] for (int i = 0; i < N; i++){
-            float fi = (i + 0.5) / N;
+        [loop] for (int i = 0; i < N*disksize; i++){
+            float fi = (i + 0.5) / N*disksize;
             float rr = fi;                 //距離比 面積に対して均一にする、面積は半径の2乗で増えるのに対して半径をsqrtで狭める
             float a  = i * GA + ang0;
             float2 dir = float2(cos(a), sin(a));    //この角度を取っておく
@@ -191,6 +192,7 @@
     SamplerState sampler0 : register(s0);
         cbuffer constant0 : register(b0){
         float detail;
+        float radius;
     };
     float4 BlurPlAlpha(float4 input : SV_Position): SV_Target{
         uint w,h;
@@ -198,7 +200,6 @@
         float2 texelSize = float2(1.0/w, 1.0/h);
         float2 uv = input.xy * texelSize;
 
-        const float radius = 10.0;
 
         float sigma_space = float(radius) / 3.0;
         float sigma_color = (1.0 - detail / 100.0) * 0.3 + 0.01;
@@ -297,7 +298,7 @@
     // L: 光マップの rg を復号したもの（光の進行方向 × sinθ）
     // 光の総量を1として正面と側面xyにどのような配分で分けられているかを三角関数を用いて計算する(ついでにwrap, rimMaskの重み計算もする)
     //（復号とは　テクスチャに保存するために変換した値を元の意味の値に戻すこと テクスチャ化する上で必要な0~1から-1~1に戻した）
-    float Receive(float4 O, float2 L, float E)
+    float Receive(float4 O, float2 L, float E, float VecStr)
     {
         float2 src = -L;              // 光源のある向き（進行方向の逆）
         float2 s2  = src * src;       // x², y²  （sin²θ·cos²φ = x², sin²θ·sin²φ = y² x²+y²=sin²θ）
@@ -309,7 +310,9 @@
         //真正面がどうなのかを調べる
         float front = (1.0 - saturate(s2.x + s2.y)) * dot(O, 0.25);  // 真後ろ成分 × 4方向平均　(1.0 - saturate(s2.x + s2.y)) = cos²θ
 
-        return E * (side + front);
+        float NonVectorLight = E * dot(O, 0.25);
+        float VectorLight = E * (side + front);
+        return lerp(NonVectorLight, VectorLight, VecStr);
     }
 
     float4 PSMain(float4 input : SV_Position): SV_Target{
@@ -326,14 +329,14 @@
         float2 L = light.rg * 2.0 - 1.0;
         float  E = light.b;                       // sloop × damp
 
-        float rim  = Receive(rimMap,  L,  E);
-        float wrap = Receive(wrapMap, L,  E);   // wrap_dir: 0〜1、回り込みの方向性を弱める
+        float rim  = Receive(rimMap,  L,  E, 1.0);
+        float wrap = Receive(wrapMap, L,  E, 0.2);   // wrap_dir: 0〜1、回り込みの方向性を弱める
 
         float3 rimLight = rim * (1 - rimVSwrap) * float3(rimR, rimG, rimB);
         float3 wrapLight = wrap * rimVSwrap * float3(wrapR, wrapG, wrapB);
 
         //float lit = strength * lerp(wrap, rim, rimVSwrap);  // rimVSwrap は 0〜1 に換算して渡す
-        float3 col = origin.rgb + rimLight + wrapLight;                       // 色はあとで light_color を掛ける
+        float3 col = origin.rgb + strength * (rimLight + wrapLight);                       // 色はあとで light_color を掛ける
         return float4(col, origin.a);
 
         //デバッグ用
@@ -431,25 +434,25 @@ local sigma_wrap = (sigma_rim + blurleng) * sinA
 if preView == 1 then
     
 elseif preView == 2 then 
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim},"copy","mirror")
-    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim, 0.3},"copy","mirror")
+    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise, 5.0},"copy", "clip")
 elseif preView == 3 then
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
-    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap, 1.0},"copy","mirror")
+    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise, 10.0},"copy", "clip")
 else
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
-    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap, 1.0},"copy","mirror")
+    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise, 10.0},"copy", "clip")
     obj.copybuffer("cache:AlphaMap", "object")
     obj.pixelshader("LightDir","object",{"cache:original", "cache:AlphaMap"},{length, lightDir / 180 * math.pi},"copy","clip")
 end
 
 if preView == 0 then
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim},"copy","mirror")
-    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_rim, 0.3},"copy","mirror")
+    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise, 5.0},"copy", "clip")
     obj.copybuffer("cache:rimMap", "object")
 
-    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap},"copy","mirror")
-    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise},"copy", "clip")
+    obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap, 1.0},"copy","mirror")
+    obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise, 10.0},"copy", "clip")
     obj.copybuffer("cache:blurMap", "object")
     obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:rimMap","cache:blurMap"},{strength, rimVSwrap /200 + 0.5, rimR/255, rimG/255, rimB/255, wrapR/255, wrapG/255, wrapB/255},"copy","loop")
 end
