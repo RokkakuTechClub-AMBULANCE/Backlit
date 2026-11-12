@@ -450,7 +450,6 @@ obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, l
 CauchyBlurAll(light_scater * light_bloom / 20)
 obj.copybuffer("cache:light","object")
 
---この辺りで回り込みの広さ、blurlengthを求める式を入れる　あとでこれで実際に動かして塩梅を探りたい
 --blurlength:0~100~1000 light_size:0~5000(半径)
 local Z0 = 200;       --被写体とカメラの距離を想定
 local light_lookSize = light_size * Z0 / (Z0 + light_bloom);
@@ -487,5 +486,3 @@ if preView == 0 then
     obj.copybuffer("cache:blurMap", "object")
     obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:rimMap","cache:blurMap"},{strength, rimVSwrap /200 + 0.5, rimR/255, rimG/255, rimB/255, wrapR/255, wrapG/255, wrapB/255},"copy","loop")
 end
-
---展望　ライトの光そのものの丸さ(丸くなかったらスポットライト　丸かったら電球　真横に合っても(つまりlight_bloomがかなり低くても)方位のある光として照らす)を実装する(時間と必要があれば)
