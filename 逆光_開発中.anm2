@@ -23,9 +23,14 @@
 --track@sigma_rim:リムライトの幅,0.0, 300.0, 150.0, 0.01;
 --track@blurleng:回り込み幅,100.0, 5000.0, 1000.0, 0.01;
 --color@rim_col:リムカラーの色,0xffffff;
---track@hueShift:色相_時間制御用,-360,360,0,0.1
---track@saturateShift:彩度_時間制御用,-100,100,0,0.1
+--track@hueShiftR:色相R_時間制御用,-360,360,0,0.1
+--track@saturateShiftR:彩度R_時間制御用,-100,100,0,0.1
 --color@wrap_col:回り込みの色,0xffffff;
+--track@hueShiftW:色相W_時間制御用,-360,360,0,0.1
+--track@saturateShiftW:彩度W_時間制御用,-100,100,0,0.1
+--track@darker:自身の暗さ,-100,0,-10,0.1;
+--track@hueD:暗部の色相,-360,360,0,0.1;
+--track@satD:暗部の彩度,0,100,0,0.1;
 
 --[[pixelshader@SDF_light:
     Texture2D tempbuffer : register(t0);
@@ -313,6 +318,7 @@
         float rimVSwrap;
         float rimR, rimG, rimB;
         float wrapR, wrapG, wrapB;
+        float shadowR, shadowG, shadowB;
     };
     float linearstep(float edge0, float edge1, float x){
         return min(max(((x) - (edge0)) / ((edge1) - (edge0)), 0.0), 1.0);
@@ -366,9 +372,11 @@
         float3 rimLight = rim * (1 - rimVSwrap) * float3(rimR, rimG, rimB);
         float3 wrapLight = wrap * rimVSwrap * float3(wrapR, wrapG, wrapB);
 
-        //float lit = strength * lerp(wrap, rim, rimVSwrap);  // rimVSwrap は 0〜1 に換算して渡す
-        float3 col = origin.rgb + strength * (rimLight + wrapLight);                       // 色はあとで light_color を掛ける
-        return float4(col, origin.a);
+        float3 shadow = float3(shadowR, shadowG, shadowB);
+        
+
+        float3 col = origin.rgb/(max(0.01,origin.a)) * shadow + strength * (rimLight + wrapLight);                       // 色はあとで light_color を掛ける
+        return float4(col* origin.a, origin.a);
 
         //デバッグ用
         //return wrapMap;
@@ -416,8 +424,10 @@ local function RGBtoHSV(r, g, b)
     return h, s, v
 end
 
--- HSV → RGB
+-- HSV → RGB 0~360, 1.0, 1.0
 local function HSVtoRGB(h, s, v)
+    
+    h = h % 360
     if s == 0 then
         local val = math.floor(v * 255)
         return val, val, val
@@ -442,8 +452,22 @@ local function HSVtoRGB(h, s, v)
     return math.floor(r*255), math.floor(g*255), math.floor(b*255)
 end
 
+local function HSVchanger(r, g, b, shiftH, shiftS)
+    local h, s, v = RGBtoHSV(r, g, b)
+    h = (h + shiftH) % 360
+    s = s + (shiftS / 100)
+    s = math.max(0, math.min(1, s + shiftS / 100))
+    local r2, g2, b2 = HSVtoRGB(h, s, v)
+    return r2, g2, b2
+end
+
 local rimR, rimG, rimB = RGB(rim_col)
 local wrapR, wrapG, wrapB = RGB(wrap_col)
+local shadowR, shadowG, shadowB = 0, 0, 0
+
+rimR, rimG, rimB = HSVchanger(rimR, rimG, rimB, hueShiftR, saturateShiftR)
+wrapR, wrapG, wrapB = HSVchanger(wrapR, wrapG, wrapB, hueShiftW, saturateShiftW)
+shadowR, shadowG, shadowB = HSVtoRGB(hueD, satD/100, (darker+100)/100)
 
 obj.copybuffer("cache:original","object")
 obj.pixelshader("SDF_light","object",{"object"},{light_size, light_x, light_y, light_xy, radius_light, light_bloom, light_damp/100, light_roundness/100},"copy","clip")
@@ -484,5 +508,7 @@ if preView == 0 then
     obj.pixelshader("EmptyLight","object",{"cache:original"},{mask, seed, sigma_wrap, 1.0},"copy","mirror")
     obj.pixelshader("BlurPlAlpha","object",{"object", "cache:original"},{noise, 10.0},"copy", "clip")
     obj.copybuffer("cache:blurMap", "object")
-    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:rimMap","cache:blurMap"},{strength, rimVSwrap /200 + 0.5, rimR/255, rimG/255, rimB/255, wrapR/255, wrapG/255, wrapB/255},"copy","loop")
+    obj.pixelshader("PSMain","object",{"cache:original","cache:light","cache:rimMap","cache:blurMap"},{strength, rimVSwrap /200 + 0.5, rimR/255, rimG/255, rimB/255, wrapR/255, wrapG/255, wrapB/255, shadowR/255, shadowG/255, shadowB/255},"copy","loop")
 end
+--今後の展望　線画部分をトリミングして…待って？そもそも線画を取っておくぐらいで良くない?多分アニメでもそんなものだよ?
+--A:でも一定以上に暗い色+リムの光源検知を組み合わせればできるはず　やってみよう
